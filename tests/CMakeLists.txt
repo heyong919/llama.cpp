@@ -199,6 +199,13 @@ llama_build_and_test(test-backend-ops.cpp)
 llama_build_and_test(test-model-load-cancel.cpp  LABEL "model")
 llama_build_and_test(test-autorelease.cpp        LABEL "model")
 
+# MLU backend tests
+if (GGML_MLU)
+    llama_build_and_test(test-mlu-add.cpp LABEL "mlu")
+    target_include_directories(test-mlu-add PRIVATE ${CMAKE_SOURCE_DIR}/ggml/src)
+    target_link_libraries(test-mlu-add PRIVATE ggml-mlu)
+endif()
+
 if (NOT GGML_BACKEND_DL)
     # these tests use the backends directly and cannot be built with dynamic loading
     llama_build_and_test(test-barrier.cpp)

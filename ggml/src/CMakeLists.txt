@@ -198,6 +198,7 @@ add_library(ggml-base
             ggml.cpp
             ggml-alloc.c
             ggml-backend.cpp
+            debug_print.c
             ggml-opt.cpp
             ggml-threading.cpp
             ggml-threading.h
@@ -367,6 +368,7 @@ ggml_add_backend(CUDA)
 ggml_add_backend(HIP)
 ggml_add_backend(Kompute)
 ggml_add_backend(METAL)
+ggml_add_backend(MLU)
 ggml_add_backend(MUSA)
 ggml_add_backend(RPC)
 ggml_add_backend(SYCL)
