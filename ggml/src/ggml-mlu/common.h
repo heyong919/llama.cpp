@@ -37,16 +37,22 @@ struct ggml_mlu_pool {
     }
     ~ggml_mlu_pool() {
         cnrtMemPoolDestroy(pool);
-    };
+    }
+
+    void set_device(int device_id) {
+        props.location.id = device_id;
+        cnrtMemPoolCreate(&pool, &props);
+    }
 
     void * alloc(size_t size, cnrtQueue_t queue) {
         void * ptr = nullptr;
         CNRT_CHECK(cnrtMemAllocFromPoolAsync(&ptr, size, pool, queue));
         return ptr;
-    };
+    }
+
     void free(void * ptr) {
         CNRT_CHECK(cnrtFree(ptr));
-    };
+    }
 
     void set_attr(cnrtMemPoolAttr_t attr, void * value) {
         CNRT_CHECK(cnrtMemPoolSetAttribute(pool, attr, value));

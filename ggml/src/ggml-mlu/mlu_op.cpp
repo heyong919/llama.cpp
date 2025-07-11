@@ -3,6 +3,7 @@
 #include "mlu_op.h"
 #include "mlu_include/cnrt.h"
 #include "mlu_include/cnnl.h"
+#include "mlu_include/cnnl_extra.h"
 
 cnnlDataType_t ggml_type_to_cnnl_type(ggml_type type) {
     switch (type) {
@@ -165,7 +166,7 @@ bool ggml_mlu_forward_impl(ggml_backend_mlu_context & ctx, struct ggml_tensor * 
         //     ggml_mlu_op_rms_norm_back(ctx, dst);
         //     break;
         case GGML_OP_MUL_MAT:
-            ggml_mlu_op_mul_mat(ctx, dst->src[0], dst->src[1], dst);
+            ggml_mlu_op_mul_mat(ctx, dst);
             break;
         // case GGML_OP_MUL_MAT_ID:
         //     ggml_mlu_mul_mat_id(ctx, dst);
@@ -255,39 +256,65 @@ bool ggml_mlu_forward_impl(ggml_backend_mlu_context & ctx, struct ggml_tensor * 
 #endif
 
 void ggml_mlu_op_sqrt(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    const void * src0_d = src0->data;
-    void * dst_d = dst->data;
+    GGML_MLU_UNARY_OP_LOCALS
 
-    GGML_ASSERT(ggml_is_contiguous(src0));
+    GGML_ASSERT(ggml_is_contiguous(src));
+    GGML_ASSERT(ggml_is_contiguous(dst));
 
-    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
-    GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
-    GGML_ASSERT(src0->type == dst->type);
+    GGML_ASSERT(src->type == GGML_TYPE_F32 || src->type == GGML_TYPE_F16);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(src->type == dst->type);
 
-    CnnlTensorDesc x_desc, y_desc;
-    auto layout_array = cnnlTensorLayout_t::CNNL_LAYOUT_ARRAY;
-    int64_t dims[] = { ggml_nelements(dst) };
-    x_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), GGML_MAX_DIMS, src0->ne);
-    y_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), GGML_MAX_DIMS, src0->ne);
+    CnnlTensorDesc x_desc(src);
+    CnnlTensorDesc y_desc(dst);
 
     CNNL_CHECK(cnnlSqrt_v2(ctx.cnnl_handle(),
                     cnnlComputationPreference_t::CNNL_COMPUTATION_HIGH_PRECISION,
-                    x_desc.desc(), src0_d,
+                    x_desc.desc(), src_d,
                     y_desc.desc(), dst_d));
 }
 
 void ggml_mlu_op_get_rows(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    (void)ctx;
-    (void)dst;
+    GGML_MLU_BINARY_OP_LOCALS
+
+    GGML_ASSERT(src1->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_is_contiguous(src0));
+    GGML_ASSERT(ggml_is_contiguous(src1));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    // 创建张量描述符（使用默认的CnnlTensorDesc构造函数，会自动处理维度反转）
+    CnnlTensorDesc params_desc(src0);
+    CnnlTensorDesc indices_desc(src1);
+    CnnlTensorDesc output_desc(dst);
+
+    int params_ndim = params_desc.shape().size();
+    int axis = params_ndim-2;
+    int batch_dims = axis;
+    
+    if (params_ndim < 2) {
+        GGML_ASSERT(false);
+    }
+    
+    const int mode = 1;        // indices不包含负数
+
+    // 执行gather操作
+    CNNL_CHECK(cnnlBatchGatherV2_v2(
+        ctx.cnnl_handle(),
+        axis,
+        batch_dims,
+        mode,
+        params_desc.desc(),
+        src0_d,
+        indices_desc.desc(),
+        src1_d,
+        output_desc.desc(),
+        dst_d
+    ));
 }
 
-void ggml_mlu_op_add(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    const ggml_tensor * src1 = dst->src[1];
-    const void * src0_d = src0->data;
-    const void * src1_d = src1->data;
-    void * dst_d = dst->data;
+void ggml_mlu_op_optensor(ggml_backend_mlu_context & ctx, ggml_tensor * dst,
+                            cnnlOpTensorDesc_t op_type) {
+    GGML_MLU_BINARY_OP_LOCALS
 
     GGML_ASSERT(ggml_is_contiguous(src0));
     GGML_ASSERT(ggml_is_contiguous(src1));
@@ -298,20 +325,18 @@ void ggml_mlu_op_add(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
     GGML_ASSERT(src0->type == src1->type && src0->type == dst->type);
 
-    CnnlTensorDesc x_desc, y_desc, z_desc;
-    auto layout_array = cnnlTensorLayout_t::CNNL_LAYOUT_ARRAY;
-    // int64_t dims[] = { ggml_nelements(dst) };
-    
-    x_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), GGML_MAX_DIMS, src0->ne);
-    y_desc.Set(layout_array, ggml_type_to_cnnl_type(src1->type), GGML_MAX_DIMS, src1->ne);
-    z_desc.Set(layout_array, ggml_type_to_cnnl_type(dst->type), GGML_MAX_DIMS, dst->ne);
+    CnnlTensorDesc x_desc(src0);
+    CnnlTensorDesc y_desc(src1);
+    CnnlTensorDesc z_desc(dst);
 
     // Create and set OpTensor descriptor for ADD operation
     cnnlOpTensorDescriptor_t op_tensor_desc;
     CNNL_CHECK(cnnlCreateOpTensorDescriptor(&op_tensor_desc));
-    CNNL_CHECK(cnnlSetOpTensorDescriptor(op_tensor_desc, CNNL_OP_TENSOR_ADD, ggml_type_to_cnnl_type(src0->type), CNNL_NOT_PROPAGATE_NAN));
+    CNNL_CHECK(cnnlSetOpTensorDescriptor(op_tensor_desc, op_type, ggml_type_to_cnnl_type(src0->type), CNNL_NOT_PROPAGATE_NAN));
 
-    const float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
+    const float alpha1 = 1.0f;
+    const float alpha2 = 1.0f;
+    const float beta   = 0.0f;
     CNNL_CHECK(cnnlOpTensor(ctx.cnnl_handle(), op_tensor_desc,
                            &alpha1, x_desc.desc(), src0_d,
                            &alpha2, y_desc.desc(), src1_d,
@@ -319,92 +344,22 @@ void ggml_mlu_op_add(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
                            &beta, z_desc.desc(), dst_d));
 
     CNNL_CHECK(cnnlDestroyOpTensorDescriptor(op_tensor_desc));
+}
+
+void ggml_mlu_op_add(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
+    ggml_mlu_op_optensor(ctx, dst, CNNL_OP_TENSOR_ADD);
 }
 
 void ggml_mlu_op_sub(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    const ggml_tensor * src1 = dst->src[1];
-    const void * src0_d = src0->data;
-    const void * src1_d = src1->data;
-    void * dst_d = dst->data;
-
-    GGML_ASSERT(ggml_is_contiguous(src0));
-    GGML_ASSERT(ggml_is_contiguous(src1));
-    GGML_ASSERT(ggml_is_contiguous(dst));
-
-    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
-    GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
-    GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
-    GGML_ASSERT(src0->type == src1->type && src0->type == dst->type);
-
-    CnnlTensorDesc x_desc, y_desc, z_desc;
-    auto layout_array = cnnlTensorLayout_t::CNNL_LAYOUT_ARRAY;
-    int64_t dims[] = { ggml_nelements(dst) };
-    
-    x_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), GGML_MAX_DIMS, src0->ne);
-    y_desc.Set(layout_array, ggml_type_to_cnnl_type(src1->type), GGML_MAX_DIMS, src1->ne);
-    z_desc.Set(layout_array, ggml_type_to_cnnl_type(dst->type), GGML_MAX_DIMS, dst->ne);
-
-    // Create and set OpTensor descriptor for SUB operation
-    cnnlOpTensorDescriptor_t op_tensor_desc;
-    CNNL_CHECK(cnnlCreateOpTensorDescriptor(&op_tensor_desc));
-    CNNL_CHECK(cnnlSetOpTensorDescriptor(op_tensor_desc, CNNL_OP_TENSOR_SUB, ggml_type_to_cnnl_type(src0->type), CNNL_NOT_PROPAGATE_NAN));
-
-    const float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-    CNNL_CHECK(cnnlOpTensor(ctx.cnnl_handle(), op_tensor_desc,
-                           &alpha1, x_desc.desc(), src0_d,
-                           &alpha2, y_desc.desc(), src1_d,
-                           nullptr, 0,
-                           &beta, z_desc.desc(), dst_d));
-
-    CNNL_CHECK(cnnlDestroyOpTensorDescriptor(op_tensor_desc));
+    ggml_mlu_op_optensor(ctx, dst, CNNL_OP_TENSOR_SUB);
 }
 
 void ggml_mlu_op_mul(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    const ggml_tensor * src1 = dst->src[1];
-    const void * src0_d = src0->data;
-    const void * src1_d = src1->data;
-    void * dst_d = dst->data;
-
-    GGML_ASSERT(ggml_is_contiguous(src0));
-    GGML_ASSERT(ggml_is_contiguous(src1));
-    GGML_ASSERT(ggml_is_contiguous(dst));
-
-    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
-    GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
-    GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
-    GGML_ASSERT(src0->type == src1->type && src0->type == dst->type);
-
-    CnnlTensorDesc x_desc, y_desc, z_desc;
-    auto layout_array = cnnlTensorLayout_t::CNNL_LAYOUT_ARRAY;
-    int64_t dims[] = { ggml_nelements(dst) };
-    
-    x_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), GGML_MAX_DIMS, src0->ne);
-    y_desc.Set(layout_array, ggml_type_to_cnnl_type(src1->type), GGML_MAX_DIMS, src1->ne);
-    z_desc.Set(layout_array, ggml_type_to_cnnl_type(dst->type), GGML_MAX_DIMS, dst->ne);
-
-    // Create and set OpTensor descriptor for MUL operation
-    cnnlOpTensorDescriptor_t op_tensor_desc;
-    CNNL_CHECK(cnnlCreateOpTensorDescriptor(&op_tensor_desc));
-    CNNL_CHECK(cnnlSetOpTensorDescriptor(op_tensor_desc, CNNL_OP_TENSOR_MUL, ggml_type_to_cnnl_type(src0->type), CNNL_NOT_PROPAGATE_NAN));
-
-    const float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-    CNNL_CHECK(cnnlOpTensor(ctx.cnnl_handle(), op_tensor_desc,
-                           &alpha1, x_desc.desc(), src0_d,
-                           &alpha2, y_desc.desc(), src1_d,
-                           nullptr, 0,
-                           &beta, z_desc.desc(), dst_d));
-
-    CNNL_CHECK(cnnlDestroyOpTensorDescriptor(op_tensor_desc));
+    ggml_mlu_op_optensor(ctx, dst, CNNL_OP_TENSOR_MUL);
 }
 
 void ggml_mlu_op_div(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    const ggml_tensor * src1 = dst->src[1];
-    const void * src0_d = src0->data;
-    const void * src1_d = src1->data;
-    void * dst_d = dst->data;
+    GGML_MLU_BINARY_OP_LOCALS
 
     GGML_ASSERT(ggml_is_contiguous(src0));
     GGML_ASSERT(ggml_is_contiguous(src1));
@@ -415,13 +370,9 @@ void ggml_mlu_op_div(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
     GGML_ASSERT(src0->type == src1->type && src0->type == dst->type);
 
-    CnnlTensorDesc x_desc, y_desc, z_desc;
-    auto layout_array = cnnlTensorLayout_t::CNNL_LAYOUT_ARRAY;
-    int64_t dims[] = { ggml_nelements(dst) };
-    
-    x_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), GGML_MAX_DIMS, src0->ne);
-    y_desc.Set(layout_array, ggml_type_to_cnnl_type(src1->type), GGML_MAX_DIMS, src1->ne);
-    z_desc.Set(layout_array, ggml_type_to_cnnl_type(dst->type), GGML_MAX_DIMS, dst->ne);
+    CnnlTensorDesc x_desc(src0);
+    CnnlTensorDesc y_desc(src1);
+    CnnlTensorDesc z_desc(dst);
 
     // Create and set Div descriptor for DIV operation
     cnnlDivDescriptor_t div_desc;
@@ -460,13 +411,14 @@ void ggml_mlu_op_norm(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
 }
 
 void ggml_mlu_op_rms_norm(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = dst->src[0];
-    const void * src0_d = src0->data;
-    void * dst_d = dst->data;
-    cnnlHandle_t handle = ctx.cnnl_handle();
+    GGML_MLU_UNARY_OP_LOCALS
 
-    GGML_ASSERT(src0->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    GGML_ASSERT(src->type == GGML_TYPE_F32 || src->type == GGML_TYPE_F16);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(src->type == dst->type);
 
     // Get epsilon parameter from dst->op_params
     float eps;
@@ -474,9 +426,8 @@ void ggml_mlu_op_rms_norm(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(eps >= 0.0f);
 
     // Create tensor descriptors
-    CnnlTensorDesc src_desc, dst_desc;
-    src_desc.Set(CNNL_LAYOUT_ARRAY, ggml_type_to_cnnl_type(src0->type), GGML_MAX_DIMS, src0->ne);
-    dst_desc.Set(CNNL_LAYOUT_ARRAY, ggml_type_to_cnnl_type(dst->type), GGML_MAX_DIMS, dst->ne);
+    CnnlTensorDesc x_desc(src);
+    CnnlTensorDesc y_desc(dst);
 
     // Create FuseNorm descriptor
     cnnlFuseNormDescriptor_t fuse_norm_desc;
@@ -486,23 +437,23 @@ void ggml_mlu_op_rms_norm(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
     // For RMS norm: no bias, no residual, no norm_bias, no norm_scale
     CNNL_CHECK(cnnlSetFuseNormDescriptor(
         fuse_norm_desc,
-        eps,                              // eps
+        eps,                             // eps
         1.0f,                            // scale (not used for RMS norm)
         false,                           // has_norm_scale
-        false,                           // has_norm_bias  
+        false,                           // has_norm_bias 
         false,                           // has_bias
         false,                           // has_residual
         false,                           // store_output_before_norm
-        CNNL_DTYPE_FLOAT,               // math_pre
-        CNNL_TRANSFORMER_RMSNORM        // mode
+        y_desc.dtype(),                  // math_pre
+        CNNL_TRANSFORMER_RMSNORM         // mode
     ));
 
     // Get workspace size
     size_t workspace_size;
     CNNL_CHECK(cnnlGetFuseNormWorkspaceSize(
-        handle,
+        ctx.cnnl_handle(),
         fuse_norm_desc,
-        src_desc.desc(),
+        x_desc.desc(),
         &workspace_size
     ));
 
@@ -515,9 +466,8 @@ void ggml_mlu_op_rms_norm(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
 
     // Call cnnlFuseNorm_v3
     CNNL_CHECK(cnnlFuseNorm_v3(
-        handle,
-        src_desc.desc(),                 // input_desc
-        src0_d,                          // input
+        ctx.cnnl_handle(),
+        x_desc.desc(), src_d,            // input
         nullptr,                         // input_scale_desc (not used)
         nullptr,                         // input_scale (not used)
         nullptr,                         // norm_scale_desc (not used)
@@ -535,7 +485,7 @@ void ggml_mlu_op_rms_norm(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
         CNNL_DTYPE_FLOAT,               // math_pre
         workspace,                       // workspace
         workspace_size,                  // workspace_size
-        dst_desc.desc(),                 // output_desc
+        y_desc.desc(),                   // output_desc
         dst_d,                           // output
         nullptr,                         // output_before_norm_desc (not used)
         nullptr,                         // output_before_norm (not used)
@@ -547,12 +497,91 @@ void ggml_mlu_op_rms_norm(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
     CNNL_CHECK(cnnlDestroyFuseNormDescriptor(fuse_norm_desc));
 }
 
-void ggml_mlu_op_mul_mat(ggml_backend_mlu_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    (void)ctx;
-    (void)src0;
-    (void)src1;
-    (void)dst;
-    // TODO: implement mul_mat operation
+void ggml_mlu_op_mul_mat(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
+    GGML_MLU_BINARY_OP_LOCALS
+
+    GGML_ASSERT(ggml_is_contiguous(src0));
+    GGML_ASSERT(ggml_is_contiguous(src1));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(src0->type == src1->type && src0->type == dst->type);
+
+    // 创建张量描述符
+    // 为了匹配CPU行为 (B * A^T)，我们交换输入参数顺序并转置A
+    CnnlTensorDesc lhs_desc(src1);  // B矩阵作为第一个参数
+    CnnlTensorDesc rhs_desc(src0);  // A矩阵作为第二个参数
+    CnnlTensorDesc z_desc(dst);
+    
+    // 创建MatMul描述符
+    cnnlMatMulDescriptor_t matmul_desc;
+    CNNL_CHECK(cnnlCreateMatMulDescriptor(&matmul_desc));
+    
+    int32_t trans_lhs = 0;  // B
+    int32_t trans_rhs = 1;  // A^T
+    CNNL_CHECK(cnnlSetMatMulDescAttr(matmul_desc, CNNL_MATMUL_DESC_TRANSA, &trans_lhs, sizeof(int32_t)));
+    CNNL_CHECK(cnnlSetMatMulDescAttr(matmul_desc, CNNL_MATMUL_DESC_TRANSB, &trans_rhs, sizeof(int32_t)));
+    
+    // 创建算法描述符
+    cnnlMatMulAlgo_t algo;
+    CNNL_CHECK(cnnlCreateMatMulAlgo(&algo));
+    
+    // 获取启发式算法
+    int requested_algo_count = 1;
+    int return_algo_count = 0;
+    cnnlMatMulHeuristicResult_t heuristic_result;
+    CNNL_CHECK(cnnlCreateMatMulHeuristicResult(&heuristic_result));
+    
+    CNNL_CHECK(cnnlGetMatMulAlgoHeuristic(ctx.cnnl_handle(),
+                                         matmul_desc,
+                                         lhs_desc.desc(),
+                                         rhs_desc.desc(),
+                                         z_desc.desc(),
+                                         z_desc.desc(),  // d_desc
+                                         nullptr,         // preference
+                                         requested_algo_count,
+                                         &heuristic_result,
+                                         &return_algo_count));
+    
+    GGML_ASSERT(return_algo_count > 0);
+    
+    // 从启发式结果获取算法和工作空间大小
+    size_t workspace_size = 0;
+    CNNL_CHECK(cnnlGetMatMulHeuristicResult(heuristic_result, algo, &workspace_size));
+    
+    // 分配工作空间
+    ggml_mlu_pool_alloc<char> mlu_alloc(ctx.pool());
+    void* workspace = nullptr;
+    if (workspace_size > 0) {
+        workspace = mlu_alloc.alloc(workspace_size, ctx.queue());
+    }
+    
+    // 执行矩阵乘法
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    
+    CNNL_CHECK(cnnlMatMul_v2(ctx.cnnl_handle(),
+                            matmul_desc,
+                            algo,
+                            &alpha,
+                            lhs_desc.desc(),  // B矩阵描述符
+                            src1_d,           // B矩阵数据
+                            rhs_desc.desc(),  // A矩阵描述符
+                            src0_d,           // A矩阵数据
+                            &beta,
+                            z_desc.desc(),    // c_desc
+                            dst_d,            // c (point to output, beta=0 so no effect)
+                            workspace,
+                            workspace_size,
+                            z_desc.desc(),    // d_desc
+                            dst_d));
+    
+    // 清理资源
+    CNNL_CHECK(cnnlDestroyMatMulHeuristicResult(heuristic_result));
+    CNNL_CHECK(cnnlDestroyMatMulAlgo(algo));
+    CNNL_CHECK(cnnlDestroyMatMulDescriptor(matmul_desc));
 }
 
 void ggml_mlu_op_soft_max(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
@@ -585,8 +614,8 @@ void ggml_mlu_op_dup(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
 
     // For non-contiguous tensors, use CNNL copy operation
     CnnlTensorDesc src_desc, dst_desc;
-    auto layout_array = cnnlTensorLayout_t::CNNL_LAYOUT_ARRAY;
     
+    auto layout_array = cnnlTensorLayout_t::CNNL_LAYOUT_ARRAY;
     // Set up tensor descriptors
     int64_t src_dims[GGML_MAX_DIMS];
     int64_t dst_dims[GGML_MAX_DIMS];
@@ -612,8 +641,8 @@ void ggml_mlu_op_dup(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
         dst_ndim = 1;
     }
 
-    src_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), src_ndim, src_dims);
-    dst_desc.Set(layout_array, ggml_type_to_cnnl_type(dst->type), dst_ndim, dst_dims);
+    src_desc.Set(ggml_type_to_cnnl_type(src0->type), src_ndim, src_dims);
+    dst_desc.Set(ggml_type_to_cnnl_type(dst->type), dst_ndim, dst_dims);
 
     // Get workspace size and allocate workspace
     size_t workspace_size = 0;
@@ -674,8 +703,8 @@ void ggml_mlu_op_cpy(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
             src1_ndim = 1;
         }
 
-        src0_desc.Set(layout_array, ggml_type_to_cnnl_type(src0->type), src0_ndim, src0_dims);
-        src1_desc.Set(layout_array, ggml_type_to_cnnl_type(src1->type), src1_ndim, src1_dims);
+        src0_desc.Set(ggml_type_to_cnnl_type(src0->type), src0_ndim, src0_dims);
+        src1_desc.Set(ggml_type_to_cnnl_type(src1->type), src1_ndim, src1_dims);
         
         // Get workspace size
         size_t workspace_size = 0;
@@ -711,10 +740,4 @@ void ggml_mlu_op_neg(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
     (void)ctx;
     (void)dst;
     // TODO: Implement neg operation
-}
-
-void ggml_mlu_op_mat_mul(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    (void)ctx;
-    (void)dst;
-    // TODO: Implement mat_mul operation
 }

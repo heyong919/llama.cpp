@@ -11,10 +11,10 @@
 #ifdef GGML_USE_MLU
 #include "ggml-mlu.h"
 #endif
-#include "debug_print.h"
 
 // Function declarations
 void init_random_data(float* data, size_t size, float min_val = -1.0f, float max_val = 1.0f);
+void init_random_indices(int32_t* indices, size_t size, int32_t max_index);
 float calculate_mse(const float* a, const float* b, size_t size);
 float calculate_max_abs_error(const float* a, const float* b, size_t size);
 
@@ -25,6 +25,16 @@ void init_random_data(float* data, size_t size, float min_val, float max_val) {
     
     for (size_t i = 0; i < size; ++i) {
         data[i] = dis(gen);
+    }
+}
+
+void init_random_indices(int32_t* indices, size_t size, int32_t max_index) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int32_t> dis(0, max_index - 1);
+    
+    for (size_t i = 0; i < size; ++i) {
+        indices[i] = dis(gen);
     }
 }
 
@@ -50,39 +60,53 @@ float calculate_max_abs_error(const float* a, const float* b, size_t size) {
     return max_error;
 }
 
-// MLU Add 算子测试类
-class MLUAddTestCase {
+// MLU Get Rows 算子测试类
+class MLUGetRowsTestCase {
 public:
-    MLUAddTestCase(const std::vector<int64_t>& shape_a, const std::vector<int64_t>& shape_b)
-        : shape_a_(shape_a), shape_b_(shape_b) {
+    MLUGetRowsTestCase(const std::vector<int64_t>& params_shape, const std::vector<int64_t>& indices_shape)
+        : params_shape_(params_shape), indices_shape_(indices_shape) {
         
         // 计算张量大小
-        size_a_ = 1;
-        for (auto dim : shape_a_) {
-            size_a_ *= dim;
+        params_size_ = 1;
+        for (auto dim : params_shape_) {
+            params_size_ *= dim;
         }
         
-        size_b_ = 1;
-        for (auto dim : shape_b_) {
-            size_b_ *= dim;
+        indices_size_ = 1;
+        for (auto dim : indices_shape_) {
+            indices_size_ *= dim;
         }
         
-        // 计算输出张量大小（广播后的形状）
-        size_out_ = std::max(size_a_, size_b_);
+        // 计算输出张量大小
+        // output shape: [params_shape[0], indices_shape[0], indices_shape[1], indices_shape[2]]
+        output_size_ = params_shape_[0] * indices_size_;
         
         // 分配内存
-        data_a_.resize(size_a_);
-        data_b_.resize(size_b_);
-        result_cpu_.resize(size_out_);
-        result_mlu_.resize(size_out_);
+        params_data_.resize(params_size_);
+        indices_data_.resize(indices_size_);
+        result_cpu_.resize(output_size_);
+        result_mlu_.resize(output_size_);
         
         // 初始化随机数据
-        init_random_data(data_a_.data(), size_a_);
-        init_random_data(data_b_.data(), size_b_);
+        init_random_data(params_data_.data(), params_size_);
+        init_random_indices(indices_data_.data(), indices_size_, params_shape_[1]);  // indices range [0, params_height)
     }
     
     bool run_test() {
-        std::cout << "Running MLU Add test..." << std::endl;
+        std::cout << "Running MLU Get Rows test..." << std::endl;
+        std::cout << "Params shape: [";
+        for (size_t i = 0; i < params_shape_.size(); ++i) {
+            std::cout << params_shape_[i];
+            if (i < params_shape_.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+        
+        std::cout << "Indices shape: [";
+        for (size_t i = 0; i < indices_shape_.size(); ++i) {
+            std::cout << indices_shape_[i];
+            if (i < indices_shape_.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
         
         // 运行 CPU 测试
         if (!run_cpu_test()) {
@@ -123,20 +147,19 @@ private:
         }
         
         // 创建张量
-        struct ggml_tensor* tensor_a = ggml_new_tensor(ctx, GGML_TYPE_F32, shape_a_.size(), shape_a_.data());
-        struct ggml_tensor* tensor_b = ggml_new_tensor(ctx, GGML_TYPE_F32, shape_b_.size(), shape_b_.data());
+        struct ggml_tensor* params_tensor = ggml_new_tensor(ctx, GGML_TYPE_F32, params_shape_.size(), params_shape_.data());
+        struct ggml_tensor* indices_tensor = ggml_new_tensor(ctx, GGML_TYPE_I32, indices_shape_.size(), indices_shape_.data());
         
         // 设置数据
-        memcpy(tensor_a->data, data_a_.data(), size_a_ * sizeof(float));
-        memcpy(tensor_b->data, data_b_.data(), size_b_ * sizeof(float));
+        memcpy(params_tensor->data, params_data_.data(), params_size_ * sizeof(float));
+        memcpy(indices_tensor->data, indices_data_.data(), indices_size_ * sizeof(int32_t));
         
-        // 执行 Add 操作
-        struct ggml_tensor* result = ggml_add(ctx, tensor_a, tensor_b);
+        // 执行 Get Rows 操作
+        struct ggml_tensor* result = ggml_get_rows(ctx, params_tensor, indices_tensor);
         
         // 构建计算图
         struct ggml_cgraph* gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, result);
-        ggml_tensor_print_info(result, "CPU-");
         
         // 执行计算
         if (ggml_backend_graph_compute(cpu_backend, gf) != GGML_STATUS_SUCCESS) {
@@ -147,7 +170,7 @@ private:
         }
         
         // 复制结果
-        memcpy(result_cpu_.data(), result->data, size_out_ * sizeof(float));
+        memcpy(result_cpu_.data(), result->data, output_size_ * sizeof(float));
         
         // 清理资源
         ggml_free(ctx);
@@ -178,16 +201,15 @@ private:
         }
         
         // 创建张量
-        struct ggml_tensor* tensor_a = ggml_new_tensor(ctx, GGML_TYPE_F32, shape_a_.size(), shape_a_.data());
-        struct ggml_tensor* tensor_b = ggml_new_tensor(ctx, GGML_TYPE_F32, shape_b_.size(), shape_b_.data());
+        struct ggml_tensor* params_tensor = ggml_new_tensor(ctx, GGML_TYPE_F32, params_shape_.size(), params_shape_.data());
+        struct ggml_tensor* indices_tensor = ggml_new_tensor(ctx, GGML_TYPE_I32, indices_shape_.size(), indices_shape_.data());
         
-        // 执行 Add 操作
-        struct ggml_tensor* result = ggml_add(ctx, tensor_a, tensor_b);
+        // 执行 Get Rows 操作
+        struct ggml_tensor* result = ggml_get_rows(ctx, params_tensor, indices_tensor);
         
         // 构建计算图
         struct ggml_cgraph* gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, result);
-        ggml_tensor_print_info(result, "MLU-");
         
         // 分配后端内存
         ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, mlu_backend);
@@ -199,8 +221,8 @@ private:
         }
         
         // 设置输入数据
-        ggml_backend_tensor_set(tensor_a, data_a_.data(), 0, size_a_ * sizeof(float));
-        ggml_backend_tensor_set(tensor_b, data_b_.data(), 0, size_b_ * sizeof(float));
+        ggml_backend_tensor_set(params_tensor, params_data_.data(), 0, params_size_ * sizeof(float));
+        ggml_backend_tensor_set(indices_tensor, indices_data_.data(), 0, indices_size_ * sizeof(int32_t));
         
         // 执行计算
         if (ggml_backend_graph_compute(mlu_backend, gf) != GGML_STATUS_SUCCESS) {
@@ -212,7 +234,7 @@ private:
         }
         
         // 获取结果
-        ggml_backend_tensor_get(result, result_mlu_.data(), 0, size_out_ * sizeof(float));
+        ggml_backend_tensor_get(result, result_mlu_.data(), 0, output_size_ * sizeof(float));
         
         // 清理资源
         ggml_backend_buffer_free(buffer);
@@ -225,8 +247,8 @@ private:
     bool compare_results() {
         const float tolerance = 1e-5f;
         
-        float mse = calculate_mse(result_cpu_.data(), result_mlu_.data(), size_out_);
-        float max_error = calculate_max_abs_error(result_cpu_.data(), result_mlu_.data(), size_out_);
+        float mse = calculate_mse(result_cpu_.data(), result_mlu_.data(), output_size_);
+        float max_error = calculate_max_abs_error(result_cpu_.data(), result_mlu_.data(), output_size_);
         
         std::cout << "Results comparison:" << std::endl;
         std::cout << "  MSE: " << mse << std::endl;
@@ -238,7 +260,7 @@ private:
             // 打印前几个不匹配的值用于调试
             std::cout << "First few mismatched values:" << std::endl;
             int count = 0;
-            for (size_t i = 0; i < size_out_ && count < 10; ++i) {
+            for (size_t i = 0; i < output_size_ && count < 10; ++i) {
                 float error = std::abs(result_cpu_[i] - result_mlu_[i]);
                 if (error > tolerance) {
                     std::cout << "  [" << i << "] CPU: " << result_cpu_[i] 
@@ -254,17 +276,18 @@ private:
         return true;
     }
     
-    std::vector<int64_t> shape_a_, shape_b_;
-    size_t size_a_, size_b_, size_out_;
-    std::vector<float> data_a_, data_b_;
+    std::vector<int64_t> params_shape_, indices_shape_;
+    size_t params_size_, indices_size_, output_size_;
+    std::vector<float> params_data_;
+    std::vector<int32_t> indices_data_;
     std::vector<float> result_cpu_, result_mlu_;
 };
 
 int main(int argc, char** argv) {
     (void)argc; // 避免未使用参数警告
     (void)argv; // 避免未使用参数警告
-    std::cout << "=== MLU Add Operator Test ===" << std::endl;
-    
+    std::cout << "=== MLU Get Rows Operator Test ===" << std::endl;
+
 #ifndef GGML_USE_MLU
     std::cerr << "MLU backend is not compiled" << std::endl;
     return 77; // Skip test
@@ -274,47 +297,70 @@ int main(int argc, char** argv) {
         std::cerr << "MLU backend is not available" << std::endl;
         return 77; // Skip test
     }
-    
+
     std::cout << "MLU backend is available" << std::endl;
-    
+
     bool all_tests_passed = true;
-    
-    // 测试用例 1: 相同形状的张量相加
-    std::cout << "\n--- Test 1: Same shape tensors ---" << std::endl;
+
+    // 测试用例 1: 2D params tensor, 1D indices
+    // params: [8, 16], indices: [5] -> requires params.ne[2] == indices.ne[1], so params: [8, 16, 1], indices: [5, 1]
+    std::cout << "\n--- Test 1: 2D params [8, 16, 1], 1D indices [5, 1] ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {4, 4});
+        MLUGetRowsTestCase test({8, 16, 1}, {5, 1});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
     }
-    
-    // 测试用例 2: 广播相加 (标量 + 张量)
-    std::cout << "\n--- Test 2: Scalar + Tensor broadcast ---" << std::endl;
+
+    // 测试用例 2: 2D params tensor, 2D indices
+    // params: [10, 20], indices: [3, 4] -> requires params.ne[2] == indices.ne[1], so params: [10, 20, 4], indices: [3, 4]
+    std::cout << "\n--- Test 2: 3D params [10, 20, 4], 2D indices [3, 4] ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {1});
+        MLUGetRowsTestCase test({10, 20, 4}, {3, 4});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
     }
-    
-    // 测试用例 3: 向量广播
-    std::cout << "\n--- Test 3: Vector broadcast ---" << std::endl;
+
+    // 测试用例 3: 3D params tensor, 1D indices
+    // params: [6, 8, 4], indices: [5] -> requires params.ne[2] == indices.ne[1], so params: [6, 8, 1], indices: [5, 1]
+    std::cout << "\n--- Test 3: 3D params [6, 8, 1], 1D indices [5, 1] ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {4, 1});
+        MLUGetRowsTestCase test({6, 8, 1}, {5, 1});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
     }
-    
-    // 测试用例 4: 更大的张量
-    std::cout << "\n--- Test 4: Larger tensors ---" << std::endl;
+
+    // 测试用例 4: 3D params tensor, 2D indices
+    // params: [12, 16, 8], indices: [4, 8] -> this should work as params.ne[2] == indices.ne[1]
+    std::cout << "\n--- Test 4: 3D params [12, 16, 8], 2D indices [4, 8] ---" << std::endl;
     {
-        MLUAddTestCase test({1024, 1024, 8}, {1, 1024});
+        MLUGetRowsTestCase test({12, 16, 8}, {4, 8});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
     }
-    
+
+    // 测试用例 5: 3D params tensor, 3D indices
+    // params: [8, 12, 6], indices: [3, 6, 1] -> this should work as params.ne[2] == indices.ne[1]
+    std::cout << "\n--- Test 5: 3D params [8, 12, 6], 3D indices [3, 6, 1] ---" << std::endl;
+    {
+        MLUGetRowsTestCase test({8, 12, 6}, {3, 6, 1});
+        if (!test.run_test()) {
+            all_tests_passed = false;
+        }
+    }
+
+    // 测试用例 6: 较大的张量
+    std::cout << "\n--- Test 6: Larger tensors [128, 256, 1], [64, 1] ---" << std::endl;
+    {
+        MLUGetRowsTestCase test({128, 256, 1}, {64, 1});
+        if (!test.run_test()) {
+            all_tests_passed = false;
+        }
+    }
+
     std::cout << "\n=== Test Summary ===" << std::endl;
     if (all_tests_passed) {
         std::cout << "All tests PASSED!" << std::endl;

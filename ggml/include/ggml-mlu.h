@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ggml.h"
-#include "ggml-common.h"
 #include "ggml-backend.h"
 // #include "ggml-backend-impl.h"
 

@@ -204,6 +204,14 @@ if (GGML_MLU)
     llama_build_and_test(test-mlu-add.cpp LABEL "mlu")
     target_include_directories(test-mlu-add PRIVATE ${CMAKE_SOURCE_DIR}/ggml/src)
     target_link_libraries(test-mlu-add PRIVATE ggml-mlu)
+
+    llama_build_and_test(test-mlu-mul-mat.cpp LABEL "mlu")
+    target_include_directories(test-mlu-mul-mat PRIVATE ${CMAKE_SOURCE_DIR}/ggml/src)
+    target_link_libraries(test-mlu-mul-mat PRIVATE ggml-mlu)
+
+    llama_build_and_test(test-mlu-get-rows.cpp LABEL "mlu")
+    target_include_directories(test-mlu-get-rows PRIVATE ${CMAKE_SOURCE_DIR}/ggml/src)
+    target_link_libraries(test-mlu-get-rows PRIVATE ggml-mlu)
 endif()
 
 if (NOT GGML_BACKEND_DL)

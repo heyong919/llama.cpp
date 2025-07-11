@@ -142,12 +142,7 @@ struct ggml_backend_mlu_buffer_type_context {
 };
 
 static void ggml_backend_mlu_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    ggml_backend_mlu_buffer_context * ctx = (ggml_backend_mlu_buffer_context *) buffer->context;
-    if (ctx->dev_ptr != nullptr) {
-        ggml_mlu_set_device(ctx->device);
-        CNRT_CHECK(cnrtFree(ctx->dev_ptr));
-        ctx->dev_ptr = nullptr;
-    }
+    ggml_backend_mlu_buffer_context * ctx = (ggml_backend_mlu_buffer_context *)buffer->context;
     delete ctx;
 }
 
@@ -192,14 +187,34 @@ static void ggml_backend_mlu_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
     ggml_backend_mlu_buffer_context * ctx = (ggml_backend_mlu_buffer_context *) buffer->context;
 
     ggml_mlu_set_device(ctx->device);
-    CNRT_CHECK(cnrtMemcpy((char *)ctx->dev_ptr + offset, (void *)data, size, CNRT_MEM_TRANS_DIR_HOST2DEV));
+    CNRT_CHECK(cnrtMemcpy((char *)tensor->data + offset, (void *)data, size, CNRT_MEM_TRANS_DIR_HOST2DEV));
 }
 
 static void ggml_backend_mlu_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     ggml_backend_mlu_buffer_context * ctx = (ggml_backend_mlu_buffer_context *) buffer->context;
 
     ggml_mlu_set_device(ctx->device);
-    CNRT_CHECK(cnrtMemcpy(data, (char *)ctx->dev_ptr + offset, size, CNRT_MEM_TRANS_DIR_DEV2HOST));
+    CNRT_CHECK(cnrtMemcpy(data, (char *)tensor->data + offset, size, CNRT_MEM_TRANS_DIR_DEV2HOST));
+}
+
+static bool ggml_backend_mlu_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
+    if (ggml_backend_buffer_is_mlu(src->buffer)) {
+        ggml_backend_mlu_buffer_context * src_ctx = (ggml_backend_mlu_buffer_context *)src->buffer->context;
+        ggml_backend_mlu_buffer_context * dst_ctx = (ggml_backend_mlu_buffer_context *)dst->buffer->context;
+        if (src_ctx->device == dst_ctx->device) {
+            CNRT_CHECK(cnrtMemcpy(dst->data, src->data, ggml_nbytes(src), CNRT_MEM_TRANS_DIR_DEV2DEV));
+        } else {
+#ifdef GGML_MLU_NO_PEER_COPY
+            return false;
+#else
+            CNRT_CHECK(cnrtMemcpyPeer(dst->data, dst_ctx->device, src->data, src_ctx->device, ggml_nbytes(src)));
+#endif
+        }
+        return true;
+    }
+    return false;
+
+    GGML_UNUSED(buffer);
 }
 
 static void ggml_backend_mlu_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
@@ -216,7 +231,7 @@ static struct ggml_backend_buffer_i ggml_backend_mlu_buffer_interface = {
     /* .memset_tensor   = */ ggml_backend_mlu_buffer_memset_tensor,
     /* .set_tensor      = */ ggml_backend_mlu_buffer_set_tensor,
     /* .get_tensor      = */ ggml_backend_mlu_buffer_get_tensor,
-    /* .cpy_tensor      = */ NULL,
+    /* .cpy_tensor      = */ ggml_backend_mlu_buffer_cpy_tensor,
     /* .clear           = */ ggml_backend_mlu_buffer_clear,
     /* .reset           = */ NULL,
 };
@@ -787,7 +802,7 @@ static void evaluate_and_capture_mlu_graph(ggml_backend_mlu_context * mlu_ctx, g
                 GGML_ASSERT(ok);
             }
         }
-
+        graph_evaluated_or_captured = true;
     }
 }
 
@@ -1278,7 +1293,7 @@ static const ggml_backend_device_i ggml_backend_mlu_device_interface = {
     /* .get_buffer_type         = */ ggml_backend_mlu_device_get_buffer_type,
     /* .get_host_buffer_type    = */ ggml_backend_mlu_device_get_host_buffer_type,
     /* .buffer_from_host_ptr    = */ NULL, // 不支持 MLU
-    /* .supports_op             = */ NULL,
+    /* .supports_op             = */ ggml_backend_mlu_device_supports_op,
     /* .supports_buft           = */ ggml_backend_mlu_supports_buft,
     /* .offload_op              = */ ggml_backend_mlu_device_offload_op,
     /* .event_new               = */ ggml_backend_mlu_device_event_new,

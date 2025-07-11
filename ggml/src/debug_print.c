@@ -22,10 +22,13 @@ void ggml_tensor_print_info(const struct ggml_tensor * tensor, const char * pref
     printf("[%s%s] op=%s type=%s\n", pre, name, ggml_op_name(tensor->op), ggml_type_name(tensor->type));
     
     // 第二行：形状、步长
-    printf("[%s%s] shape=[%lld,%lld,%lld,%lld] stride=[%zu,%zu,%zu,%zu]\n", pre, name,
+    printf("[%s%s] shape=[%lld,%lld,%lld,%lld] strides=[%zu,%zu,%zu,%zu]\n", pre, name,
            (long long)tensor->ne[0], (long long)tensor->ne[1], 
            (long long)tensor->ne[2], (long long)tensor->ne[3],
-           tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3]);
+           tensor->nb[0]/ggml_type_size(tensor->type),
+           tensor->nb[1]/ggml_type_size(tensor->type),
+           tensor->nb[2]/ggml_type_size(tensor->type),
+           tensor->nb[3]/ggml_type_size(tensor->type));
     
     // 第三行：源张量及对应的op类型
     printf("[%s%s] src=", pre, name);
@@ -37,9 +40,11 @@ void ggml_tensor_print_info(const struct ggml_tensor * tensor, const char * pref
                 if (i > 0) {
                     printf(", ");
                 }
-                printf("%s(%s)", 
+                printf("%s(%s)[%lld,%lld,%lld,%lld]", 
                        tensor->src[i]->name[0] ? tensor->src[i]->name : "<unnamed>", 
-                       ggml_op_name(tensor->src[i]->op));
+                       ggml_op_name(tensor->src[i]->op),
+                        (long long)tensor->src[i]->ne[0], (long long)tensor->src[i]->ne[1], 
+                        (long long)tensor->src[i]->ne[2], (long long)tensor->src[i]->ne[3]);
             }
         }
     }

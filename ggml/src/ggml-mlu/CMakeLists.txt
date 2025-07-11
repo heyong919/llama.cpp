@@ -1,8 +1,9 @@
 # 从环境变量获取NEUWARE_HOME路径，支持多个可能的安装位置
+set(DEFAULT_NEUWARE_HOME "/projs/AE/heyong/workspace/v1.22.1/neuware_home/")
 if (DEFINED ENV{NEUWARE_HOME} AND EXISTS $ENV{NEUWARE_HOME})
     set(NEUWARE_HOME $ENV{NEUWARE_HOME})
-elseif (EXISTS "/usr/local/neuware")
-    set(NEUWARE_HOME "/usr/local/neuware")
+elseif (EXISTS ${DEFAULT_NEUWARE_HOME})
+    set(NEUWARE_HOME ${DEFAULT_NEUWARE_HOME})
 else()
     message(WARNING "NEUWARE_HOME not found. Please set NEUWARE_HOME environment variable or install MLU SDK to standard location.")
     return()
