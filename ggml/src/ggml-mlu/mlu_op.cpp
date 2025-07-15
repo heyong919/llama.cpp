@@ -585,9 +585,132 @@ void ggml_mlu_op_mul_mat(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
 }
 
 void ggml_mlu_op_soft_max(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {
-    (void)ctx;
-    (void)dst;
-    // TODO: implement soft_max operation
+    GGML_MLU_UNARY_OP_LOCALS
+
+    GGML_ASSERT(ggml_is_contiguous(src));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    GGML_ASSERT(src->type == GGML_TYPE_F32 || src->type == GGML_TYPE_F16);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(src->type == dst->type);
+
+    // Get parameters from dst->op_params
+    float scale = 1.0f;
+    float max_bias = 0.0f;
+    
+    // Read parameters from op_params if they exist
+    if (dst->op_params[0] != 0.0f) {
+        memcpy(&scale, dst->op_params, sizeof(float));
+    }
+    if (dst->op_params[1] != 0.0f) {
+        memcpy(&max_bias, (float*)dst->op_params + 1, sizeof(float));
+    }
+
+    // CNNL softmax requires 3D input tensor
+    // We need to reshape the tensor to 3D format
+    int64_t ne0 = src->ne[0];
+    int64_t ne1 = src->ne[1];
+    int64_t ne2 = src->ne[2];
+    int64_t ne3 = src->ne[3];
+    
+    // Calculate total size to ensure correctness
+    int64_t total_size = ne0 * ne1 * ne2 * ne3;
+    
+    // Reshape to 3D: [batch, seq_len, features]
+    int64_t cnnl_dims[3];
+    if (ne3 > 1) {
+        // 4D tensor: [ne3, ne2, ne1*ne0] -> [batch, seq, features]
+        cnnl_dims[0] = ne3*ne2;
+        cnnl_dims[1] = ne1;
+        cnnl_dims[2] = ne0;
+    } else if (ne2 > 1) {
+        // 3D tensor: [ne2, ne1, ne0] -> [batch, seq, features]
+        cnnl_dims[0] = ne2;
+        cnnl_dims[1] = ne1;
+        cnnl_dims[2] = ne0;
+    } else if (ne1 > 1) {
+        // 2D tensor: [1, ne1, ne0] -> [batch, seq, features]
+        cnnl_dims[0] = 1;
+        cnnl_dims[1] = ne1;
+        cnnl_dims[2] = ne0;
+    } else {
+        // 1D tensor: [1, 1, ne0] -> [batch, seq, features]
+        cnnl_dims[0] = 1;
+        cnnl_dims[1] = 1;
+        cnnl_dims[2] = ne0;
+    }
+
+    // Create 3D tensor descriptors for CNNL
+    CnnlTensorDesc src_desc, dst_desc;
+    src_desc.Set(ggml_type_to_cnnl_type(src->type), 3, cnnl_dims);
+    dst_desc.Set(ggml_type_to_cnnl_type(dst->type), 3, cnnl_dims);
+    
+    // Set algorithm and mode
+    cnnlSoftmaxAlgorithm_t algorithm = CNNL_SOFTMAX_ACCURATE;
+    cnnlSoftmaxMode_t mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION; // Apply to last dimension
+
+    // Alpha and beta scaling factors (set to NULL as they are not supported currently)
+    const void* alpha = nullptr;
+    const void* beta = nullptr;
+
+    // Apply scale parameter to input before softmax if it's not 1.0
+    void* scaled_src_d = const_cast<void*>(src_d);
+    ggml_mlu_pool_alloc<char> temp_alloc(ctx.pool());
+    
+    if (scale != 1.0f) {
+        // Allocate temporary buffer for scaled input
+        const size_t temp_size = ggml_nelements(src) * ggml_type_size(src->type);
+        scaled_src_d = temp_alloc.alloc(temp_size, ctx.queue());
+
+        // Create OpTensor descriptor for scalar multiplication
+        cnnlOpTensorDescriptor_t op_tensor_desc;
+        CNNL_CHECK(cnnlCreateOpTensorDescriptor(&op_tensor_desc));
+        CNNL_CHECK(cnnlSetOpTensorDescriptor(op_tensor_desc, CNNL_OP_TENSOR_MUL, ggml_type_to_cnnl_type(src->type), CNNL_NOT_PROPAGATE_NAN));
+
+        // Create scalar tensor descriptor for scale
+        int64_t scalar_dims[1] = {1};
+        CnnlTensorDesc scalar_desc;
+        scalar_desc.Set(ggml_type_to_cnnl_type(src->type), 1, scalar_dims);
+
+        // Allocate scalar on MLU device
+        ggml_mlu_pool_alloc<float> scale_alloc(ctx.pool());
+        void* scale_device = scale_alloc.alloc(1, ctx.queue());
+        
+        // Copy scale value to device
+        if (src->type == GGML_TYPE_F32) {
+            CNRT_CHECK(cnrtMemcpy(scale_device, &scale, sizeof(float), CNRT_MEM_TRANS_DIR_HOST2DEV));
+        } else if (src->type == GGML_TYPE_F16) {
+            ggml_fp16_t scale_fp16 = ggml_fp32_to_fp16(scale);
+            CNRT_CHECK(cnrtMemcpy(scale_device, &scale_fp16, sizeof(ggml_fp16_t), CNRT_MEM_TRANS_DIR_HOST2DEV));
+        }
+
+        // Perform scaled_src = src * scale using OpTensor
+        const float alpha1 = 1.0f;
+        const float alpha2 = 1.0f;
+        const float beta = 0.0f;
+        
+        CNNL_CHECK(cnnlOpTensor(ctx.cnnl_handle(), op_tensor_desc,
+                               &alpha1, src_desc.desc(), src_d,
+                               &alpha2, scalar_desc.desc(), scale_device,
+                               nullptr, 0,  // workspace and workspace_size
+                               &beta, src_desc.desc(), scaled_src_d));
+
+        // Cleanup
+        CNNL_CHECK(cnnlDestroyOpTensorDescriptor(op_tensor_desc));
+    }
+
+    // Call CNNL softmax forward function on scaled input
+    CNNL_CHECK(cnnlSoftmaxForward(
+        ctx.cnnl_handle(),
+        algorithm,
+        mode,
+        alpha,
+        src_desc.desc(),
+        scaled_src_d,
+        beta,
+        dst_desc.desc(),
+        dst_d
+    ));
 }
 
 void ggml_mlu_op_rope(ggml_backend_mlu_context & ctx, ggml_tensor * dst) {

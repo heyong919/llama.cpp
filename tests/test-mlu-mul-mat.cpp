@@ -373,7 +373,7 @@ private:
         const float tolerance = 1e-4f;  // 矩阵乘法的容差稍大一些
         
         // 保存CPU和MLU结果到文件
-        save_results_to_files();
+        // save_results_to_files();
         
         float mse = calculate_mse(result_cpu_.data(), result_mlu_.data(), size_c_);
         float max_error = calculate_max_abs_error(result_cpu_.data(), result_mlu_.data(), size_c_);

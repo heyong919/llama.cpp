@@ -85,10 +85,10 @@ float calculate_max_abs_error_fp16(const ggml_fp16_t* a, const ggml_fp16_t* b, s
     return max_error;
 }
 
-// MLU Add 算子测试类
-class MLUAddTestCase {
+// MLU Mul 算子测试类
+class MLUMulTestCase {
 public:
-    MLUAddTestCase(const std::vector<int64_t>& shape_a, const std::vector<int64_t>& shape_b, ggml_type data_type = GGML_TYPE_F32)
+    MLUMulTestCase(const std::vector<int64_t>& shape_a, const std::vector<int64_t>& shape_b, ggml_type data_type = GGML_TYPE_F32)
         : shape_a_(shape_a), shape_b_(shape_b), data_type_(data_type) {
 
         // 计算张量大小
@@ -126,7 +126,7 @@ public:
     }
     
     bool run_test() {
-        std::cout << "Running MLU Add test (" << ggml_type_name(data_type_) << ")..." << std::endl;
+        std::cout << "Running MLU Mul test (" << ggml_type_name(data_type_) << ")..." << std::endl;
         
         // 运行 CPU 测试
         if (!run_cpu_test()) {
@@ -180,7 +180,7 @@ private:
         }
         
         // 执行 Add 操作
-        struct ggml_tensor* result = ggml_add(ctx, tensor_a, tensor_b);
+        struct ggml_tensor* result = ggml_mul(ctx, tensor_a, tensor_b);
         
         // 构建计算图
         struct ggml_cgraph* gf = ggml_new_graph(ctx);
@@ -235,7 +235,7 @@ private:
         struct ggml_tensor* tensor_b = ggml_new_tensor(ctx, data_type_, shape_b_.size(), shape_b_.data());
 
         // 执行 Add 操作
-        struct ggml_tensor* result = ggml_add(ctx, tensor_a, tensor_b);
+        struct ggml_tensor* result = ggml_mul(ctx, tensor_a, tensor_b);
 
         // 构建计算图
         struct ggml_cgraph* gf = ggml_new_graph(ctx);
@@ -349,7 +349,7 @@ private:
 int main(int argc, char** argv) {
     (void)argc; // 避免未使用参数警告
     (void)argv; // 避免未使用参数警告
-    std::cout << "=== MLU Add Operator Test ===" << std::endl;
+    std::cout << "=== MLU Mul Operator Test ===" << std::endl;
     
 #ifndef GGML_USE_MLU
     std::cerr << "MLU backend is not compiled" << std::endl;
@@ -368,7 +368,7 @@ int main(int argc, char** argv) {
     // 测试用例 1: 相同形状的张量相加
     std::cout << "\n--- Test 1: Same shape tensors ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {4, 4});
+        MLUMulTestCase test({4, 4}, {4, 4});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
@@ -377,7 +377,7 @@ int main(int argc, char** argv) {
     // 测试用例 2: 广播相加 (标量 + 张量)
     std::cout << "\n--- Test 2: Scalar + Tensor broadcast ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {1});
+        MLUMulTestCase test({4, 4}, {1});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
@@ -386,7 +386,7 @@ int main(int argc, char** argv) {
     // 测试用例 3: 向量广播
     std::cout << "\n--- Test 3: Vector broadcast ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {4, 1});
+        MLUMulTestCase test({4, 4}, {4, 1});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
@@ -395,7 +395,7 @@ int main(int argc, char** argv) {
     // 测试用例 4: 更大的张量
     std::cout << "\n--- Test 4: Larger tensors ---" << std::endl;
     {
-        MLUAddTestCase test({1024, 1024, 8}, {1, 1024});
+        MLUMulTestCase test({1024, 1024, 8}, {1, 1024});
         if (!test.run_test()) {
             all_tests_passed = false;
         }
@@ -407,7 +407,7 @@ int main(int argc, char** argv) {
     // 测试用例 5: FP16 相同形状的张量相加
     std::cout << "\n--- Test 5: FP16 Same shape tensors ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {4, 4}, GGML_TYPE_F16);
+        MLUMulTestCase test({4, 4}, {4, 4}, GGML_TYPE_F16);
         if (!test.run_test()) {
             all_tests_passed = false;
         }
@@ -416,7 +416,7 @@ int main(int argc, char** argv) {
     // 测试用例 6: FP16 广播相加 (标量 + 张量)
     std::cout << "\n--- Test 6: FP16 Scalar + Tensor broadcast ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {1}, GGML_TYPE_F16);
+        MLUMulTestCase test({4, 4}, {1}, GGML_TYPE_F16);
         if (!test.run_test()) {
             all_tests_passed = false;
         }
@@ -425,7 +425,7 @@ int main(int argc, char** argv) {
     // 测试用例 7: FP16 向量广播
     std::cout << "\n--- Test 7: FP16 Vector broadcast ---" << std::endl;
     {
-        MLUAddTestCase test({4, 4}, {4, 1}, GGML_TYPE_F16);
+        MLUMulTestCase test({4, 4}, {4, 1}, GGML_TYPE_F16);
         if (!test.run_test()) {
             all_tests_passed = false;
         }
@@ -434,7 +434,7 @@ int main(int argc, char** argv) {
     // 测试用例 8: FP16 更大的张量
     std::cout << "\n--- Test 8: FP16 Larger tensors ---" << std::endl;
     {
-        MLUAddTestCase test({1024, 1024, 8}, {1, 1024}, GGML_TYPE_F16);
+        MLUMulTestCase test({1024, 1024, 8}, {1, 1024}, GGML_TYPE_F16);
         if (!test.run_test()) {
             all_tests_passed = false;
         }
